@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Email to Azure DevOps</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <h1>Send to Azure DevOps</h1>
+    <button id="toggle-settings" class="link-btn">Settings ▾</button>
+  </header>
+
+  <section id="settings" class="hidden">
+    <label>Organization
+      <input id="org" type="text" placeholder="e.g. contoso" />
+    </label>
+    <label>Project
+      <input id="project" type="text" placeholder="e.g. MyProject" />
+    </label>
+    <label>Personal Access Token (PAT)
+      <input id="pat" type="password" placeholder="Work Items: Read & Write scope" />
+    </label>
+    <label>Default work item type
+      <select id="witype-setting">
+        <option>Task</option>
+        <option>Bug</option>
+        <option>User Story</option>
+        <option>Issue</option>
+      </select>
+    </label>
+    <label>Default area path
+      <select id="default-area-path">
+        <option value="">(project default)</option>
+      </select>
+    </label>
+    <button id="save-settings" class="primary-btn">Save</button>
+    <p class="hint">Stored only on this computer (chrome.storage.local). Never synced or sent anywhere except directly to dev.azure.com.</p>
+  </section>
+
+  <section id="main">
+    <div id="not-outlook" class="hidden hint">
+      Open an email in Outlook Web (outlook.office.com or outlook.live.com), select it, then reopen this popup.
+    </div>
+
+    <div id="form">
+      <label>Title
+        <input id="title" type="text" />
+      </label>
+      <label>Work item type
+        <select id="witype"></select>
+      </label>
+      <label>Area path
+        <select id="area-path">
+          <option value="">(project default)</option>
+        </select>
+      </label>
+      <p class="hint" id="area-path-hint"></p>
+      <button id="refresh-areas-btn" class="link-btn">↻ Refresh area paths</button>
+      <label>Description
+        <textarea id="description" rows="7"></textarea>
+      </label>
+      <label class="checkbox-label">
+        <input id="trim-signature" type="checkbox" checked />
+        Trim signature / sign-off from description
+      </label>
+      <p class="hint" id="signature-hint"></p>
+      <button id="rescan-btn" class="link-btn">↻ Re-scan open email</button>
+
+      <label>Attach files
+        <input id="file-input" type="file" multiple />
+      </label>
+      <p class="hint" id="detected-attachments"></p>
+
+      <label class="checkbox-label">
+        <input id="include-inline-images" type="checkbox" checked />
+        Include inline images from email body
+      </label>
+      <p class="hint" id="inline-images-hint"></p>
+
+      <button id="create-btn" class="primary-btn">Create work item</button>
+      <div id="status"></div>
+    </div>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>

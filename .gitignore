@@ -1,0 +1,10 @@
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+
+# In case any local config/secrets file gets added later -
+# settings currently live only in chrome.storage.local, never in a file,
+# but this is here so a future change doesn't accidentally commit one.
+*.local.json
+.env
