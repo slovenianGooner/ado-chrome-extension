@@ -73,14 +73,14 @@ function findSubject() {
   return title || "";
 }
 
-function findAttachmentNames() {
+function findAttachmentNames(scope) {
   // NOTE: not yet confirmed against a live email with real attachments -
   // this is a best-effort guess at likely markup patterns. If it comes up
   // empty on an email you know has attachments, that's expected for now;
   // the file picker in the popup still works regardless. Open dev tools on
   // such an email, inspect the attachment row, and share the markup to get
   // this tightened up.
-  const pane = findReadingPane();
+  const pane = scope || findReadingPane();
   const names = new Set();
   const exts =
     /\.(pdf|docx?|xlsx?|pptx?|png|jpe?g|gif|txt|csv|zip|msg|eml|heic|mp4|mov)$/i;
@@ -295,3 +295,459 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // keep the message channel open for the async response
   }
 });
+
+/* =====================================================================
+ * Per-message "Send to Azure DevOps" button
+ *
+ * Instead of always acting on whichever message happens to be topmost,
+ * inject a small button next to each message's own "Reply" button so the
+ * user can pick exactly which email in a conversation thread to send.
+ * Clicking it opens an in-page panel (built in a shadow root so Outlook's
+ * page styles can't bleed into it) scoped to that specific message.
+ * ===================================================================== */
+
+const WORK_ITEM_TYPES = ["Task", "Bug", "User Story", "Issue"];
+const ADO_BTN_WRAP_CLASS = "ado-wi-inject-btn-wrap";
+
+function findMessageContainer(bodyEl) {
+  if (!bodyEl) return findReadingPane();
+  return bodyEl.closest('[aria-label="Email message" i]') || bodyEl;
+}
+
+function findMessageBodyElementNear(replyEl) {
+  // Confirmed via live inspection: each open message is wrapped in a
+  // div[aria-label="Email message"] that contains both that message's own
+  // Message body and its own Reply/Reply all/Forward action row - so
+  // climbing from the Reply node to that wrapper scopes us to the right
+  // message even when a conversation thread has several.
+  const container = replyEl.closest('[aria-label="Email message" i]');
+  const body = container && container.querySelector('[role="document"][aria-label="Message body" i]');
+  return body || findMessageBodyElement();
+}
+
+function findReplyButtons() {
+  // Confirmed via live inspection: the per-message quick-action row (the
+  // one with the reaction/theme icons next to Reply/Reply all/Forward,
+  // distinct from the ribbon's Respond group) renders Reply as
+  // role="menuitem" aria-label="Reply" - not a <button>. The "i" flag on
+  // the attribute selector makes the match case-insensitive while still
+  // requiring the whole value to be exactly "Reply" (so "Reply all" is
+  // correctly excluded).
+  return Array.from(document.querySelectorAll('[role="menuitem"][aria-label="Reply" i]'));
+}
+
+function createAdoTriggerButton() {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "Send to ADO";
+  btn.title = "Create an Azure DevOps work item from this email";
+  btn.setAttribute("aria-label", "Send this email to Azure DevOps");
+  Object.assign(btn.style, {
+    marginLeft: "6px",
+    padding: "3px 8px",
+    fontSize: "12px",
+    fontWeight: "600",
+    fontFamily: "inherit",
+    lineHeight: "1.2",
+    borderRadius: "4px",
+    border: "1px solid currentColor",
+    background: "transparent",
+    color: "inherit",
+    cursor: "pointer",
+    verticalAlign: "middle",
+    opacity: "0.85",
+  });
+  btn.addEventListener("mouseenter", () => (btn.style.opacity = "1"));
+  btn.addEventListener("mouseleave", () => (btn.style.opacity = "0.85"));
+  return btn;
+}
+
+function injectAdoButtons() {
+  findReplyButtons().forEach((replyEl) => {
+    const host = replyEl.parentElement;
+    if (!host) return;
+    if (host.querySelector(`:scope > .${ADO_BTN_WRAP_CLASS}`)) return;
+
+    const bodyEl = findMessageBodyElementNear(replyEl);
+    if (!bodyEl) return;
+
+    const wrap = document.createElement("span");
+    wrap.className = ADO_BTN_WRAP_CLASS;
+    wrap.style.display = "inline-flex";
+    wrap.style.verticalAlign = "middle";
+
+    const btn = createAdoTriggerButton();
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openAdoPanel(bodyEl);
+    });
+
+    wrap.appendChild(btn);
+    // Insert right after the Reply item itself, in the same toolbar row.
+    host.insertBefore(wrap, replyEl.nextSibling);
+  });
+}
+
+function debounce(fn, delayMs) {
+  let handle;
+  return (...args) => {
+    clearTimeout(handle);
+    handle = setTimeout(() => fn(...args), delayMs);
+  };
+}
+
+function startAdoButtonInjection() {
+  injectAdoButtons();
+  const rerun = debounce(injectAdoButtons, 300);
+  const observer = new MutationObserver(rerun);
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", startAdoButtonInjection);
+} else {
+  startAdoButtonInjection();
+}
+
+/* ---------------- In-page panel ---------------- */
+
+function getStoredSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(
+      ["ado_org", "ado_project", "ado_pat", "ado_witype", "ado_default_areapath"],
+      resolve
+    );
+  });
+}
+
+function sendToBackground(type, payload) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type, payload }, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      if (!response || !response.ok) {
+        reject(new Error((response && response.error) || "no response from extension"));
+        return;
+      }
+      resolve(response.data);
+    });
+  });
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = () => reject(new Error(`could not read "${file.name}"`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function dataUrlToBase64(dataUrl) {
+  return (dataUrl || "").split(",")[1] || "";
+}
+
+const AREA_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day
+
+function getCache(key) {
+  return new Promise((resolve) => chrome.storage.local.get([key], (r) => resolve(r[key] || null)));
+}
+
+function setCache(key, value) {
+  return new Promise((resolve) => chrome.storage.local.set({ [key]: value }, resolve));
+}
+
+async function loadAreaPathsIntoSelect(select, hintEl, settings, force) {
+  const { ado_org: org, ado_project: project, ado_pat: pat, ado_default_areapath: defaultAreaPath } = settings;
+  const cacheKey = `areapaths_${org}_${project}`;
+
+  const populate = (paths) => {
+    select.innerHTML = '<option value="">(project default)</option>';
+    paths.forEach(({ path, depth }) => {
+      const opt = document.createElement("option");
+      opt.value = path;
+      opt.textContent = " ".repeat(depth) + path.split("\\").pop();
+      select.appendChild(opt);
+    });
+    if (defaultAreaPath && paths.some((p) => p.path === defaultAreaPath)) select.value = defaultAreaPath;
+  };
+
+  if (!force) {
+    const cached = await getCache(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < AREA_CACHE_TTL_MS) {
+      populate(cached.paths);
+      hintEl.textContent = `${cached.paths.length} area paths (cached).`;
+      return;
+    }
+  }
+
+  hintEl.textContent = "Loading area paths…";
+  try {
+    const paths = await sendToBackground("ADO_FETCH_AREA_PATHS", { org, project, pat });
+    await setCache(cacheKey, { paths, fetchedAt: Date.now() });
+    populate(paths);
+    hintEl.textContent = `${paths.length} area paths loaded.`;
+  } catch (e) {
+    hintEl.textContent = "Couldn't load area paths: " + e.message;
+  }
+}
+
+const PANEL_STYLES = `
+  :host { all: initial; }
+  * { box-sizing: border-box; font-family: "Segoe UI", Tahoma, Arial, sans-serif; }
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.35);
+    z-index: 2147483647; display: flex; align-items: flex-start;
+    justify-content: center; padding-top: 6vh;
+  }
+  .panel {
+    width: 420px; max-height: 88vh; overflow-y: auto; background: #fff;
+    border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+    padding: 16px; font-size: 13px; color: #242424;
+  }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .header h2 { font-size: 15px; margin: 0; }
+  .close-btn { background: none; border: none; font-size: 18px; line-height: 1; cursor: pointer; color: #605e5c; }
+  label { display: block; font-weight: 600; margin: 10px 0 4px; }
+  input[type="text"], select, textarea {
+    width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 13px;
+    border: 1px solid #c8c6c4; border-radius: 4px; font-weight: normal;
+  }
+  input[type="file"] { width: 100%; font-weight: normal; font-size: 12px; }
+  textarea { font-family: inherit; resize: vertical; }
+  .checkbox-label { display: flex; align-items: center; gap: 6px; font-weight: normal; margin-top: 10px; }
+  .checkbox-label input { margin: 0; }
+  .hint { font-size: 11px; color: #605e5c; font-weight: normal; margin: 6px 0 0; }
+  .actions { display: flex; gap: 8px; margin-top: 14px; }
+  .primary-btn, .cancel-btn {
+    border-radius: 4px; padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; flex: 1;
+  }
+  .primary-btn { background: #0078d4; color: #fff; border: none; }
+  .primary-btn:hover { background: #106ebe; }
+  .primary-btn:disabled { background: #c8c6c4; cursor: not-allowed; }
+  .cancel-btn { background: #fff; color: #242424; border: 1px solid #c8c6c4; }
+  #status { margin-top: 10px; padding: 8px; border-radius: 4px; font-size: 12px; white-space: pre-wrap; }
+  #status.success { background: #dff6dd; color: #107c10; }
+  #status.error { background: #fde7e9; color: #a80000; }
+  #status.info { background: #f3f2f1; color: #323130; }
+`;
+
+const PANEL_MARKUP = `
+  <div class="overlay">
+    <div class="panel">
+      <div class="header">
+        <h2>Send email to Azure DevOps</h2>
+        <button class="close-btn" title="Close">×</button>
+      </div>
+      <label>Title<input type="text" class="title" /></label>
+      <label>Work item type<select class="witype"></select></label>
+      <label>Area path<select class="areapath"><option value="">(project default)</option></select></label>
+      <p class="hint areapath-hint"></p>
+      <label>Description<textarea class="description" rows="8"></textarea></label>
+      <label class="checkbox-label"><input type="checkbox" class="trim-sig" checked /> Trim signature / sign-off from description</label>
+      <p class="hint sig-hint"></p>
+      <label>Attach files<input type="file" multiple class="file-input" /></label>
+      <p class="hint attach-hint"></p>
+      <label class="checkbox-label"><input type="checkbox" class="inline-images" checked /> Include inline images from email body</label>
+      <p class="hint inline-hint"></p>
+      <div id="status"></div>
+      <div class="actions">
+        <button class="cancel-btn">Cancel</button>
+        <button class="primary-btn create-btn">Create work item</button>
+      </div>
+    </div>
+  </div>
+`;
+
+let adoPanelHost = null;
+
+function closeAdoPanel() {
+  if (adoPanelHost) {
+    adoPanelHost.remove();
+    adoPanelHost = null;
+  }
+}
+
+async function openAdoPanel(bodyEl) {
+  closeAdoPanel();
+
+  adoPanelHost = document.createElement("div");
+  document.body.appendChild(adoPanelHost);
+  const shadow = adoPanelHost.attachShadow({ mode: "open" });
+  const style = document.createElement("style");
+  style.textContent = PANEL_STYLES;
+  shadow.appendChild(style);
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = PANEL_MARKUP;
+  shadow.appendChild(wrapper);
+
+  const q = (sel) => shadow.querySelector(sel);
+  const els = {
+    overlay: q(".overlay"),
+    close: q(".close-btn"),
+    cancel: q(".cancel-btn"),
+    create: q(".create-btn"),
+    title: q(".title"),
+    witype: q(".witype"),
+    areapath: q(".areapath"),
+    areapathHint: q(".areapath-hint"),
+    description: q(".description"),
+    trimSig: q(".trim-sig"),
+    sigHint: q(".sig-hint"),
+    fileInput: q(".file-input"),
+    attachHint: q(".attach-hint"),
+    inlineImages: q(".inline-images"),
+    inlineHint: q(".inline-hint"),
+    status: q("#status"),
+  };
+
+  els.close.addEventListener("click", closeAdoPanel);
+  els.cancel.addEventListener("click", closeAdoPanel);
+  els.overlay.addEventListener("click", (e) => {
+    if (e.target === els.overlay) closeAdoPanel();
+  });
+
+  WORK_ITEM_TYPES.forEach((t) => {
+    const opt = document.createElement("option");
+    opt.value = t;
+    opt.textContent = t;
+    els.witype.appendChild(opt);
+  });
+
+  const settings = await getStoredSettings();
+  if (!settings.ado_org || !settings.ado_project || !settings.ado_pat) {
+    els.status.textContent =
+      'Set Organization, Project, and PAT first — open the extension icon\'s "Settings".';
+    els.status.className = "error";
+    els.create.disabled = true;
+  } else {
+    els.witype.value = settings.ado_witype || "Task";
+    loadAreaPathsIntoSelect(els.areapath, els.areapathHint, settings, false);
+  }
+
+  const container = findMessageContainer(bodyEl);
+  const inlineImages = await extractInlineImages(bodyEl);
+  const bodyTextFull = normalizeBodyText(bodyEl ? bodyEl.innerText : "");
+  const bodyTextTrimmed = trimSignature(bodyTextFull);
+
+  els.title.value = findSubject();
+
+  const applyTrim = () => {
+    els.description.value = els.trimSig.checked ? bodyTextTrimmed : bodyTextFull;
+  };
+  applyTrim();
+  els.trimSig.addEventListener("change", applyTrim);
+  els.sigHint.textContent =
+    bodyTextTrimmed !== bodyTextFull
+      ? "Signature/sign-off detected and trimmed — toggle off to see the full text."
+      : "No signature/sign-off detected to trim.";
+
+  const attachmentNames = findAttachmentNames(container);
+  els.attachHint.textContent = attachmentNames.length
+    ? "Detected on this email: " + attachmentNames.join(", ") + " — use the file picker to actually attach them."
+    : "";
+
+  els.inlineHint.textContent = inlineImages.length
+    ? `${inlineImages.length} inline image(s) found in this message (${inlineImages.map((i) => i.name).join(", ")}).`
+    : "No inline images detected in this message.";
+
+  // Using .onclick (not addEventListener) here because onCreateFromPanel
+  // repoints this same handler to close the panel once the work item is
+  // created - a second addEventListener would stack instead of replacing.
+  els.create.onclick = () => onCreateFromPanel(els, inlineImages);
+}
+
+function panelShowStatus(els, msg, kind) {
+  els.status.textContent = msg;
+  els.status.className = kind || "info";
+}
+
+async function onCreateFromPanel(els, inlineImages) {
+  const settings = await getStoredSettings();
+  const { ado_org: org, ado_project: project, ado_pat: pat } = settings;
+  if (!org || !project || !pat) {
+    panelShowStatus(els, "Missing Organization/Project/PAT — configure them via the extension icon first.", "error");
+    return;
+  }
+
+  const title = els.title.value.trim();
+  if (!title) {
+    panelShowStatus(els, "Title is required.", "error");
+    return;
+  }
+
+  const witype = els.witype.value;
+  const areaPath = els.areapath.value;
+  const description = els.description.value;
+  const files = els.fileInput.files;
+
+  els.create.disabled = true;
+  try {
+    panelShowStatus(els, "Creating work item…", "info");
+    const workItem = await sendToBackground("ADO_CREATE_WORK_ITEM", {
+      org,
+      project,
+      pat,
+      witype,
+      title,
+      description,
+      areaPath,
+    });
+
+    for (let i = 0; i < files.length; i++) {
+      panelShowStatus(els, `Work item #${workItem.id} created.\nUploading ${i + 1}/${files.length}: ${files[i].name}…`, "info");
+      try {
+        const bytesBase64 = await fileToBase64(files[i]);
+        await sendToBackground("ADO_UPLOAD_ATTACHMENT", {
+          org,
+          project,
+          pat,
+          workItemId: workItem.id,
+          fileName: files[i].name,
+          bytesBase64,
+        });
+      } catch (e) {
+        panelShowStatus(els, `Work item #${workItem.id} created, but "${files[i].name}" failed to attach: ${e.message}`, "error");
+      }
+    }
+
+    if (els.inlineImages.checked && inlineImages.length > 0) {
+      for (let i = 0; i < inlineImages.length; i++) {
+        const img = inlineImages[i];
+        panelShowStatus(
+          els,
+          `Work item #${workItem.id} created.\nUploading inline image ${i + 1}/${inlineImages.length}: ${img.name}…`,
+          "info"
+        );
+        try {
+          await sendToBackground("ADO_UPLOAD_ATTACHMENT", {
+            org,
+            project,
+            pat,
+            workItemId: workItem.id,
+            fileName: img.name,
+            bytesBase64: dataUrlToBase64(img.dataUrl),
+          });
+        } catch (e) {
+          panelShowStatus(els, `Work item #${workItem.id} created, but inline image "${img.name}" failed to attach: ${e.message}`, "error");
+        }
+      }
+    }
+
+    const orgUrl = org.startsWith("http") ? org.replace(/\/$/, "") : `https://dev.azure.com/${org}`;
+    const link = `${orgUrl}/${encodeURIComponent(project)}/_workitems/edit/${workItem.id}`;
+    panelShowStatus(els, `Done. Work item #${workItem.id} created.\n${link}`, "success");
+
+    els.create.textContent = "Close";
+    els.create.disabled = false;
+    els.create.onclick = closeAdoPanel;
+    els.cancel.textContent = "Open work item";
+    els.cancel.onclick = () => window.open(link, "_blank", "noopener");
+  } catch (err) {
+    panelShowStatus(els, "Failed: " + err.message, "error");
+    els.create.disabled = false;
+  }
+}
