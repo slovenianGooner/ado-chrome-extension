@@ -307,7 +307,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
  * ===================================================================== */
 
 const WORK_ITEM_TYPES = ["Task", "Bug", "User Story", "Issue"];
-const ADO_BTN_WRAP_CLASS = "ado-wi-inject-btn-wrap";
 
 function findMessageContainer(bodyEl) {
   if (!bodyEl) return findReadingPane();
@@ -333,59 +332,114 @@ function findReplyButtons() {
   // the attribute selector makes the match case-insensitive while still
   // requiring the whole value to be exactly "Reply" (so "Reply all" is
   // correctly excluded).
-  return Array.from(document.querySelectorAll('[role="menuitem"][aria-label="Reply" i]'));
+  //
+  // A second, unrelated element also matches this selector: the mode
+  // switcher (Reply / Reply all / Forward tabs) inside an open inline
+  // reply-compose editor, which Outlook nests inside the same
+  // div[aria-label="Email message"] wrapper as the message being replied
+  // to - so that ancestor check alone doesn't filter it out. It renders as
+  // an actual <button>, whereas the quick-action row's Reply is a <div>
+  // carrying Fluent's overflow-tracking attribute (data-overflow-item);
+  // requiring both distinguishes the two.
+  return Array.from(document.querySelectorAll('[role="menuitem"][aria-label="Reply" i]')).filter(
+    (el) => el.tagName === "DIV" && el.hasAttribute("data-overflow-item") && el.closest('[aria-label="Email message" i]')
+  );
 }
 
+// A clipboard-with-checkmark glyph, in the same visual language as an
+// "add work item" action. Drawn with currentColor so it follows whatever
+// text color the surrounding quick-action row is using (light or dark theme).
+const ADO_ICON_SVG = `
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect x="3" y="2.5" width="10" height="12" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
+    <path d="M6 2.5V1.8a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v0.7" stroke="currentColor" stroke-width="1.3"/>
+    <path d="M5.7 8.7l1.4 1.4L10.4 6.7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+`;
+
 function createAdoTriggerButton() {
+  // Sized to match the sibling icon-only menu items in this same row (the
+  // sun/theme and smiley/reaction toggles are 28x28, borderless, icon
+  // only - confirmed via live inspection of their computed style).
+  //
+  // IMPORTANT: this button is never inserted into Outlook's own toolbar
+  // DOM. That toolbar is a Fluent UI "Toolbar" with overflow behaviour -
+  // it measures its own children's widths and moves whatever doesn't fit
+  // into a "..." menu. Adding any extra child (even a small one) changes
+  // that measurement and can bump Reply/Reply all/Forward themselves into
+  // the overflow menu - confirmed live: a wider icon+text version of this
+  // button pushed all three out of view. Instead, this button is
+  // absolutely positioned on top of the page (see positionAdoButton) so
+  // it never participates in Outlook's own layout at all.
   const btn = document.createElement("button");
   btn.type = "button";
-  btn.textContent = "Send to ADO";
   btn.title = "Create an Azure DevOps work item from this email";
   btn.setAttribute("aria-label", "Send this email to Azure DevOps");
+  btn.innerHTML = ADO_ICON_SVG;
   Object.assign(btn.style, {
-    marginLeft: "6px",
-    padding: "3px 8px",
-    fontSize: "12px",
-    fontWeight: "600",
-    fontFamily: "inherit",
-    lineHeight: "1.2",
+    position: "fixed",
+    width: "28px",
+    height: "28px",
+    padding: "0",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
     borderRadius: "4px",
-    border: "1px solid currentColor",
+    border: "none",
     background: "transparent",
-    color: "inherit",
     cursor: "pointer",
-    verticalAlign: "middle",
-    opacity: "0.85",
+    zIndex: "2147483000",
   });
-  btn.addEventListener("mouseenter", () => (btn.style.opacity = "1"));
-  btn.addEventListener("mouseleave", () => (btn.style.opacity = "0.85"));
+  btn.addEventListener("mouseenter", () => (btn.style.background = "rgba(128,128,128,0.25)"));
+  btn.addEventListener("mouseleave", () => (btn.style.background = "transparent"));
   return btn;
 }
 
+// Maps a live Reply menuitem element to the floating button anchored to it.
+const adoButtonsByReplyEl = new Map();
+
+function positionAdoButton(replyEl, btn) {
+  const rect = replyEl.getBoundingClientRect();
+  const visible = rect.width > 0 && rect.height > 0 && !!replyEl.offsetParent;
+  btn.style.display = visible ? "flex" : "none";
+  if (!visible) return;
+  // Anchored just to the right of Reply itself, matching its height, so it
+  // reads as part of that action row without being structurally inside it.
+  btn.style.top = `${Math.round(rect.top + (rect.height - 28) / 2)}px`;
+  btn.style.left = `${Math.round(rect.right + 4)}px`;
+  // Sampling Reply's own text color keeps the icon legible in both
+  // Outlook's light and dark themes without relying on CSS inheritance,
+  // which breaks once this button is moved out of Outlook's DOM subtree.
+  btn.style.color = getComputedStyle(replyEl).color;
+}
+
 function injectAdoButtons() {
-  findReplyButtons().forEach((replyEl) => {
-    const host = replyEl.parentElement;
-    if (!host) return;
-    if (host.querySelector(`:scope > .${ADO_BTN_WRAP_CLASS}`)) return;
+  const liveReplyEls = new Set(findReplyButtons());
 
-    const bodyEl = findMessageBodyElementNear(replyEl);
-    if (!bodyEl) return;
+  // Drop badges whose Reply element got removed/replaced (message closed,
+  // navigated away from, etc).
+  for (const [replyEl, btn] of adoButtonsByReplyEl) {
+    if (!liveReplyEls.has(replyEl) || !document.contains(replyEl)) {
+      btn.remove();
+      adoButtonsByReplyEl.delete(replyEl);
+    }
+  }
 
-    const wrap = document.createElement("span");
-    wrap.className = ADO_BTN_WRAP_CLASS;
-    wrap.style.display = "inline-flex";
-    wrap.style.verticalAlign = "middle";
-
-    const btn = createAdoTriggerButton();
-    btn.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      openAdoPanel(bodyEl);
-    });
-
-    wrap.appendChild(btn);
-    // Insert right after the Reply item itself, in the same toolbar row.
-    host.insertBefore(wrap, replyEl.nextSibling);
+  liveReplyEls.forEach((replyEl) => {
+    let btn = adoButtonsByReplyEl.get(replyEl);
+    if (!btn) {
+      const bodyEl = findMessageBodyElementNear(replyEl);
+      if (!bodyEl) return;
+      btn = createAdoTriggerButton();
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openAdoPanel(bodyEl);
+      });
+      document.body.appendChild(btn);
+      adoButtonsByReplyEl.set(replyEl, btn);
+    }
+    positionAdoButton(replyEl, btn);
   });
 }
 
@@ -397,11 +451,19 @@ function debounce(fn, delayMs) {
   };
 }
 
+function repositionAllAdoButtons() {
+  adoButtonsByReplyEl.forEach((btn, replyEl) => positionAdoButton(replyEl, btn));
+}
+
 function startAdoButtonInjection() {
   injectAdoButtons();
   const rerun = debounce(injectAdoButtons, 300);
   const observer = new MutationObserver(rerun);
   observer.observe(document.body, { childList: true, subtree: true });
+
+  const reposition = debounce(repositionAllAdoButtons, 50);
+  window.addEventListener("scroll", reposition, { capture: true, passive: true });
+  window.addEventListener("resize", reposition, { passive: true });
 }
 
 if (document.readyState === "loading") {
