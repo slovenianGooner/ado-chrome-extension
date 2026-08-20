@@ -349,11 +349,13 @@ function findReplyButtons() {
 // A clipboard-with-checkmark glyph, in the same visual language as an
 // "add work item" action. Drawn with currentColor so it follows whatever
 // text color the surrounding quick-action row is using (light or dark theme).
+// A circled-plus glyph - "create a new item" - drawn as a thin outline
+// with no filled rectangle, so it reads as a plain icon like its
+// sun/smiley/Reply/Forward neighbors rather than a boxy chip.
 const ADO_ICON_SVG = `
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <rect x="3" y="2.5" width="10" height="12" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
-    <path d="M6 2.5V1.8a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v0.7" stroke="currentColor" stroke-width="1.3"/>
-    <path d="M5.7 8.7l1.4 1.4L10.4 6.7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3"/>
+    <path d="M8 5.3v5.4M5.3 8h5.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
   </svg>
 `;
 
@@ -377,6 +379,16 @@ function createAdoTriggerButton() {
   btn.setAttribute("aria-label", "Send this email to Azure DevOps");
   btn.innerHTML = ADO_ICON_SVG;
   Object.assign(btn.style, {
+    // Without resetting appearance, the browser's native button chrome
+    // (a light chip/box in Chrome) shows through underneath our icon,
+    // making it look like a separate control instead of a plain icon
+    // matching its sun/smiley/Reply/Forward neighbors.
+    appearance: "none",
+    WebkitAppearance: "none",
+    boxSizing: "border-box",
+    margin: "0",
+    outline: "none",
+    font: "inherit",
     position: "fixed",
     width: "28px",
     height: "28px",
@@ -387,6 +399,7 @@ function createAdoTriggerButton() {
     borderRadius: "4px",
     border: "none",
     background: "transparent",
+    boxShadow: "none",
     cursor: "pointer",
     zIndex: "2147483000",
   });
