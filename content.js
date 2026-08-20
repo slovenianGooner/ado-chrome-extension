@@ -324,135 +324,143 @@ function findMessageBodyElementNear(replyEl) {
   return body || findMessageBodyElement();
 }
 
-function findReplyButtons() {
-  // Confirmed via live inspection: the per-message quick-action row (the
-  // one with the reaction/theme icons next to Reply/Reply all/Forward,
-  // distinct from the ribbon's Respond group) renders Reply as
-  // role="menuitem" aria-label="Reply" - not a <button>. The "i" flag on
-  // the attribute selector makes the match case-insensitive while still
-  // requiring the whole value to be exactly "Reply" (so "Reply all" is
-  // correctly excluded).
-  //
-  // A second, unrelated element also matches this selector: the mode
-  // switcher (Reply / Reply all / Forward tabs) inside an open inline
-  // reply-compose editor, which Outlook nests inside the same
-  // div[aria-label="Email message"] wrapper as the message being replied
-  // to - so that ancestor check alone doesn't filter it out. It renders as
-  // an actual <button>, whereas the quick-action row's Reply is a <div>
-  // carrying Fluent's overflow-tracking attribute (data-overflow-item);
-  // requiring both distinguishes the two.
-  return Array.from(document.querySelectorAll('[role="menuitem"][aria-label="Reply" i]')).filter(
-    (el) => el.tagName === "DIV" && el.hasAttribute("data-overflow-item") && el.closest('[aria-label="Email message" i]')
+function findMoreActionsButtons() {
+  // Confirmed via live inspection: each message's quick-action row ends in
+  // a "..." button whose accessible name is "More items" - opening it
+  // reveals the same Reply/Reply all/Forward/Delete/etc menu shown in the
+  // screenshot. Scoping to the message wrapper excludes the ribbon's own
+  // "More items" overflow chevron, which is unrelated.
+  return Array.from(document.querySelectorAll('button[aria-label="More items" i]')).filter((el) =>
+    el.closest('[aria-label="Email message" i]')
   );
 }
 
-// A clipboard-with-checkmark glyph, in the same visual language as an
-// "add work item" action. Drawn with currentColor so it follows whatever
-// text color the surrounding quick-action row is using (light or dark theme).
-// A circled-plus glyph - "create a new item" - drawn as a thin outline
-// with no filled rectangle, so it reads as a plain icon like its
-// sun/smiley/Reply/Forward neighbors rather than a boxy chip.
-const ADO_ICON_SVG = `
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3"/>
-    <path d="M8 5.3v5.4M5.3 8h5.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
-  </svg>
-`;
+// Fluent's menu items render an icon-font ligature glyph (a private-use-area
+// character) directly inside the item's text node, ahead of the visible
+// label - e.g. Reply's textContent is "Reply". Stripping that
+// range gets the actual label so items can be matched by name.
+function menuItemLabel(el) {
+  return (el.textContent || "").replace(/[-]/g, "").trim();
+}
 
-function createAdoTriggerButton() {
-  // Sized to match the sibling icon-only menu items in this same row (the
-  // sun/theme and smiley/reaction toggles are 28x28, borderless, icon
-  // only - confirmed via live inspection of their computed style).
-  //
-  // IMPORTANT: this button is never inserted into Outlook's own toolbar
-  // DOM. That toolbar is a Fluent UI "Toolbar" with overflow behaviour -
-  // it measures its own children's widths and moves whatever doesn't fit
-  // into a "..." menu. Adding any extra child (even a small one) changes
-  // that measurement and can bump Reply/Reply all/Forward themselves into
-  // the overflow menu - confirmed live: a wider icon+text version of this
-  // button pushed all three out of view. Instead, this button is
-  // absolutely positioned on top of the page (see positionAdoButton) so
-  // it never participates in Outlook's own layout at all.
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.title = "Create an Azure DevOps work item from this email";
-  btn.setAttribute("aria-label", "Send this email to Azure DevOps");
-  btn.innerHTML = ADO_ICON_SVG;
-  Object.assign(btn.style, {
-    // Without resetting appearance, the browser's native button chrome
-    // (a light chip/box in Chrome) shows through underneath our icon,
-    // making it look like a separate control instead of a plain icon
-    // matching its sun/smiley/Reply/Forward neighbors.
-    appearance: "none",
-    WebkitAppearance: "none",
-    boxSizing: "border-box",
-    margin: "0",
-    outline: "none",
-    font: "inherit",
-    position: "fixed",
-    width: "28px",
-    height: "28px",
-    padding: "0",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: "4px",
-    border: "none",
-    background: "transparent",
-    boxShadow: "none",
-    cursor: "pointer",
-    zIndex: "2147483000",
+// A circled-plus glyph - "create a new item" - drawn as a thin outline with
+// no filled rectangle, matching Fluent's other outline-style menu icons.
+//
+// Built via createElementNS rather than an innerHTML string: Outlook runs
+// a sanitizer (backed by a Trusted Types default policy) that silently
+// strips <svg>/<script> tags out of any HTML string assigned through
+// innerHTML, leaving the element empty with no error - confirmed live.
+// Elements created through the DOM API aren't parsed from a string at all,
+// so they aren't touched by that sanitizer.
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function createAdoIcon() {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("width", "16");
+  svg.setAttribute("height", "16");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("fill", "none");
+
+  const circle = document.createElementNS(SVG_NS, "circle");
+  circle.setAttribute("cx", "8");
+  circle.setAttribute("cy", "8");
+  circle.setAttribute("r", "6");
+  circle.setAttribute("stroke", "currentColor");
+  circle.setAttribute("stroke-width", "1.3");
+
+  const plus = document.createElementNS(SVG_NS, "path");
+  plus.setAttribute("d", "M8 5.3v5.4M5.3 8h5.4");
+  plus.setAttribute("stroke", "currentColor");
+  plus.setAttribute("stroke-width", "1.3");
+  plus.setAttribute("stroke-linecap", "round");
+
+  svg.appendChild(circle);
+  svg.appendChild(plus);
+  return svg;
+}
+
+// Which message a freshly-opened "..." menu belongs to. Set the instant a
+// "More items" button is clicked (before the menu even exists in the DOM),
+// consumed the instant a qualifying menu is observed, and time-boxed so a
+// missed click can't misattribute some unrelated menu opened later.
+let pendingMenuBodyEl = null;
+let pendingMenuTimer = null;
+
+function armPendingMenuTarget(bodyEl) {
+  pendingMenuBodyEl = bodyEl;
+  clearTimeout(pendingMenuTimer);
+  pendingMenuTimer = setTimeout(() => {
+    pendingMenuBodyEl = null;
+  }, 2000);
+}
+
+function buildAdoMenuItem(referenceItem, bodyEl) {
+  // Cloning the real Reply item's own classes (Fluent's generated atomic
+  // CSS, not JS-driven) makes this item pick up correct hover/focus/theme
+  // styling for free, instead of hand-rolling it to match.
+  const item = document.createElement("div");
+  item.setAttribute("role", "menuitem");
+  item.tabIndex = -1;
+  item.className = referenceItem.className;
+  item.classList.add("ado-menu-item");
+
+  const refIcon = referenceItem.querySelector('[class*="MenuItem__icon"]');
+  const refContent = referenceItem.querySelector('[class*="MenuItem__content"]');
+
+  const iconSpan = document.createElement("span");
+  if (refIcon) iconSpan.className = refIcon.className;
+  iconSpan.appendChild(createAdoIcon());
+
+  const contentSpan = document.createElement("span");
+  if (refContent) contentSpan.className = refContent.className;
+  contentSpan.textContent = "Send to Azure DevOps";
+
+  item.appendChild(iconSpan);
+  item.appendChild(contentSpan);
+
+  item.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Fluent dismisses its own menu on Escape - simpler and more robust
+    // than reaching into its internal open/close state to close it manually.
+    item.closest('[role="menu"]')?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    openAdoPanel(bodyEl);
   });
-  btn.addEventListener("mouseenter", () => (btn.style.background = "rgba(128,128,128,0.25)"));
-  btn.addEventListener("mouseleave", () => (btn.style.background = "transparent"));
-  return btn;
+
+  return item;
 }
 
-// Maps a live Reply menuitem element to the floating button anchored to it.
-const adoButtonsByReplyEl = new Map();
+function injectAdoMenuItem(menuEl) {
+  // No content-based check here on purpose: which items a per-message
+  // "..." menu contains varies with available toolbar width (Reply/Reply
+  // all/Forward only appear in it once they no longer fit inline, and were
+  // absent in live testing on a wide window) - confirmed via live
+  // inspection. pendingMenuBodyEl, armed the instant our own tracked
+  // "More items" button was clicked, is what identifies this menu as ours.
+  if (!pendingMenuBodyEl) return;
+  if (menuEl.querySelector(".ado-menu-item")) return;
 
-function positionAdoButton(replyEl, btn) {
-  const rect = replyEl.getBoundingClientRect();
-  const visible = rect.width > 0 && rect.height > 0 && !!replyEl.offsetParent;
-  btn.style.display = visible ? "flex" : "none";
-  if (!visible) return;
-  // Anchored just to the right of Reply itself, matching its height, so it
-  // reads as part of that action row without being structurally inside it.
-  btn.style.top = `${Math.round(rect.top + (rect.height - 28) / 2)}px`;
-  btn.style.left = `${Math.round(rect.right + 4)}px`;
-  // Sampling Reply's own text color keeps the icon legible in both
-  // Outlook's light and dark themes without relying on CSS inheritance,
-  // which breaks once this button is moved out of Outlook's DOM subtree.
-  btn.style.color = getComputedStyle(replyEl).color;
+  const bodyEl = pendingMenuBodyEl;
+  pendingMenuBodyEl = null;
+  clearTimeout(pendingMenuTimer);
+
+  const items = Array.from(menuEl.querySelectorAll('[role="menuitem"]'));
+  const referenceItem = items.find((el) => menuItemLabel(el) === "Reply") || items[0];
+  if (!referenceItem) return;
+
+  // Always the first item, per the user's ask - insert ahead of Reply
+  // rather than at menu.children[0], since Fluent keeps a hidden,
+  // non-interactive node there for its own focus handling.
+  menuEl.insertBefore(buildAdoMenuItem(referenceItem, bodyEl), referenceItem);
 }
 
-function injectAdoButtons() {
-  const liveReplyEls = new Set(findReplyButtons());
+const wiredMoreButtons = new WeakSet();
 
-  // Drop badges whose Reply element got removed/replaced (message closed,
-  // navigated away from, etc).
-  for (const [replyEl, btn] of adoButtonsByReplyEl) {
-    if (!liveReplyEls.has(replyEl) || !document.contains(replyEl)) {
-      btn.remove();
-      adoButtonsByReplyEl.delete(replyEl);
-    }
-  }
-
-  liveReplyEls.forEach((replyEl) => {
-    let btn = adoButtonsByReplyEl.get(replyEl);
-    if (!btn) {
-      const bodyEl = findMessageBodyElementNear(replyEl);
-      if (!bodyEl) return;
-      btn = createAdoTriggerButton();
-      btn.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        openAdoPanel(bodyEl);
-      });
-      document.body.appendChild(btn);
-      adoButtonsByReplyEl.set(replyEl, btn);
-    }
-    positionAdoButton(replyEl, btn);
+function wireMoreActionsButtons() {
+  findMoreActionsButtons().forEach((btn) => {
+    if (wiredMoreButtons.has(btn)) return;
+    wiredMoreButtons.add(btn);
+    btn.addEventListener("click", () => armPendingMenuTarget(findMessageBodyElementNear(btn)));
   });
 }
 
@@ -464,25 +472,27 @@ function debounce(fn, delayMs) {
   };
 }
 
-function repositionAllAdoButtons() {
-  adoButtonsByReplyEl.forEach((btn, replyEl) => positionAdoButton(replyEl, btn));
-}
+function startAdoMenuInjection() {
+  wireMoreActionsButtons();
+  const rewireDebounced = debounce(wireMoreActionsButtons, 300);
 
-function startAdoButtonInjection() {
-  injectAdoButtons();
-  const rerun = debounce(injectAdoButtons, 300);
-  const observer = new MutationObserver(rerun);
+  const observer = new MutationObserver((mutations) => {
+    rewireDebounced();
+    for (const mutation of mutations) {
+      mutation.addedNodes.forEach((node) => {
+        if (!(node instanceof HTMLElement)) return;
+        if (node.matches?.('[role="menu"]')) injectAdoMenuItem(node);
+        node.querySelectorAll?.('[role="menu"]').forEach(injectAdoMenuItem);
+      });
+    }
+  });
   observer.observe(document.body, { childList: true, subtree: true });
-
-  const reposition = debounce(repositionAllAdoButtons, 50);
-  window.addEventListener("scroll", reposition, { capture: true, passive: true });
-  window.addEventListener("resize", reposition, { passive: true });
 }
 
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", startAdoButtonInjection);
+  document.addEventListener("DOMContentLoaded", startAdoMenuInjection);
 } else {
-  startAdoButtonInjection();
+  startAdoMenuInjection();
 }
 
 /* ---------------- In-page panel ---------------- */
