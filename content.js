@@ -581,43 +581,89 @@ async function loadAreaPathsIntoSelect(select, hintEl, settings, force) {
 }
 
 const PANEL_STYLES = `
-  :host { all: initial; }
+  :host {
+    all: initial;
+    --overlay-bg: rgba(0,0,0,0.35);
+    --panel-bg: #fff;
+    --panel-shadow: 0 8px 30px rgba(0,0,0,0.3);
+    --text: #242424;
+    --text-muted: #605e5c;
+    --border: #c8c6c4;
+    --input-bg: #fff;
+    --btn-primary-bg: #0078d4;
+    --btn-primary-bg-hover: #106ebe;
+    --btn-primary-text: #fff;
+    --btn-disabled-bg: #c8c6c4;
+    --btn-secondary-bg: #fff;
+    --status-success-bg: #dff6dd;
+    --status-success-text: #107c10;
+    --status-error-bg: #fde7e9;
+    --status-error-text: #a80000;
+    --status-info-bg: #f3f2f1;
+    --status-info-text: #323130;
+  }
+  /* System theme follows prefers-color-scheme; Outlook's own dark mode
+     isn't exposed to a content script, so this panel tracks the OS/browser
+     theme rather than Outlook's independently-toggled one. */
+  @media (prefers-color-scheme: dark) {
+    :host {
+      --overlay-bg: rgba(0,0,0,0.55);
+      --panel-bg: #292929;
+      --panel-shadow: 0 8px 30px rgba(0,0,0,0.6);
+      --text: #f3f2f1;
+      --text-muted: #c8c6c4;
+      --border: #4b4b4b;
+      --input-bg: #1f1f1f;
+      --btn-primary-bg: #2899f5;
+      --btn-primary-bg-hover: #479ef5;
+      --btn-primary-text: #0a0a0a;
+      --btn-disabled-bg: #4b4b4b;
+      --btn-secondary-bg: #1f1f1f;
+      --status-success-bg: #0f2e12;
+      --status-success-text: #6bcf70;
+      --status-error-bg: #3b1113;
+      --status-error-text: #ff9a9a;
+      --status-info-bg: #333333;
+      --status-info-text: #e0e0e0;
+    }
+  }
   * { box-sizing: border-box; font-family: "Segoe UI", Tahoma, Arial, sans-serif; }
   .overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.35);
+    position: fixed; inset: 0; background: var(--overlay-bg);
     z-index: 2147483647; display: flex; align-items: flex-start;
     justify-content: center; padding-top: 6vh;
   }
   .panel {
-    width: 420px; max-height: 88vh; overflow-y: auto; background: #fff;
-    border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,0.3);
-    padding: 16px; font-size: 13px; color: #242424;
+    width: 420px; max-height: 88vh; overflow-y: auto; background: var(--panel-bg);
+    border-radius: 8px; box-shadow: var(--panel-shadow);
+    padding: 16px; font-size: 13px; color: var(--text);
   }
   .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
   .header h2 { font-size: 15px; margin: 0; }
-  .close-btn { background: none; border: none; font-size: 18px; line-height: 1; cursor: pointer; color: #605e5c; }
+  .close-btn { background: none; border: none; font-size: 18px; line-height: 1; cursor: pointer; color: var(--text-muted); }
   label { display: block; font-weight: 600; margin: 10px 0 4px; }
   input[type="text"], select, textarea {
     width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 13px;
-    border: 1px solid #c8c6c4; border-radius: 4px; font-weight: normal;
+    border: 1px solid var(--border); border-radius: 4px; font-weight: normal;
+    background: var(--input-bg); color: var(--text);
   }
-  input[type="file"] { width: 100%; font-weight: normal; font-size: 12px; }
+  input[type="file"] { width: 100%; font-weight: normal; font-size: 12px; color: var(--text); }
   textarea { font-family: inherit; resize: vertical; }
   .checkbox-label { display: flex; align-items: center; gap: 6px; font-weight: normal; margin-top: 10px; }
   .checkbox-label input { margin: 0; }
-  .hint { font-size: 11px; color: #605e5c; font-weight: normal; margin: 6px 0 0; }
+  .hint { font-size: 11px; color: var(--text-muted); font-weight: normal; margin: 6px 0 0; }
   .actions { display: flex; gap: 8px; margin-top: 14px; }
   .primary-btn, .cancel-btn {
     border-radius: 4px; padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; flex: 1;
   }
-  .primary-btn { background: #0078d4; color: #fff; border: none; }
-  .primary-btn:hover { background: #106ebe; }
-  .primary-btn:disabled { background: #c8c6c4; cursor: not-allowed; }
-  .cancel-btn { background: #fff; color: #242424; border: 1px solid #c8c6c4; }
+  .primary-btn { background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; }
+  .primary-btn:hover { background: var(--btn-primary-bg-hover); }
+  .primary-btn:disabled { background: var(--btn-disabled-bg); cursor: not-allowed; }
+  .cancel-btn { background: var(--btn-secondary-bg); color: var(--text); border: 1px solid var(--border); }
   #status { margin-top: 10px; padding: 8px; border-radius: 4px; font-size: 12px; white-space: pre-wrap; }
-  #status.success { background: #dff6dd; color: #107c10; }
-  #status.error { background: #fde7e9; color: #a80000; }
-  #status.info { background: #f3f2f1; color: #323130; }
+  #status.success { background: var(--status-success-bg); color: var(--status-success-text); }
+  #status.error { background: var(--status-error-bg); color: var(--status-error-text); }
+  #status.info { background: var(--status-info-bg); color: var(--status-info-text); }
 `;
 
 const PANEL_MARKUP = `
